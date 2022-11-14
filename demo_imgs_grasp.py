@@ -127,14 +127,66 @@ def test_opencv_video_format(codec, file_ext):
             return True
         return False
 
+def _create_text_labels(classes, scores, class_names, is_crowd=None):
+    """
+    Args:
+        classes (list[int] or None):
+        scores (list[float] or None):
+        class_names (list[str] or None):
+        is_crowd (list[bool] or None):
+
+    Returns:
+        list[str] or None
+    """
+    labels = None
+    if classes is not None:
+        if class_names is not None and len(class_names) > 0:
+            labels = [class_names[i] for i in classes]
+        else:
+            labels = [str(i) for i in classes]
+    if scores is not None:
+        if labels is None:
+            labels = ["{:.0f}%".format(s * 100) for s in scores]
+        else:
+            labels = ["{} {:.0f}%".format(l, s * 100) for l, s in zip(labels, scores)]
+    if labels is not None and is_crowd is not None:
+        labels = [l + ("|crowd" if crowd else "") for l, crowd in zip(labels, is_crowd)]
+    return labels
+
+
+def create_mask(original, processing_type="corner"):
+    '''
+    processing_type:
+        corner:ボウルやカップなど縁を掴みたいもの
+        center:積み木やボトルなどそのまま把持できるもの
+
+    '''
+    kernel = np.ones((5, 5), np.uint8)
+    if processing_type=="corner":
+        erosion = cv2.erode(original, kernel=kernel, iterations=5)
+        dilation = cv2.dilate(original, kernel=kernel, iterations=3)
+        diff = dilation-erosion
+    # elif processing_type=="center":
+    else:
+        dilation = cv2.erode(original, kernel=kernel, iterations=5)
+        diff = dilation
+    diff = diff.astype(bool)
+    return diff
+
+
+def label2keyword(label):
+    if label.lower().replace(' ', '') in ["bowl", "cup"]:
+        return 'corner'
+    else:
+        return 'center'
+
 
 if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
     args = get_parser().parse_args()
-    setup_logger(name="fvcore")
-    logger = setup_logger()
-    logger.info("Arguments: " + str(args))
-
+    # setup_logger(name="fvcore")
+    # logger = setup_logger()
+    # logger.info("Arguments: " + str(args))
     cfg = setup_cfg(args)
 
     demo = VisualizationDemo(cfg, args, outline=True)
@@ -150,54 +202,61 @@ if __name__ == "__main__":
             start_time = time.time()
             predictions, visualized_output = demo.run_on_image(img)
 
-            logger.info(
-                "{}: {} in {:.2f}s".format(
-                    path,
-                    "detected {} instances".format(len(predictions["instances"]))
-                    if "instances" in predictions
-                    else "finished",
-                    time.time() - start_time,
-                )
-            )
+            # logger.info(
+            #     "{}: {} in {:.2f}s".format(
+            #         path,
+            #         "detected {} instances".format(len(predictions["instances"]))
+            #         if "instances" in predictions
+            #         else "finished",
+            #         time.time() - start_time,
+            #     )
+            # )
             out_path = os.path.join(args.output, path.split("/")[-1].split(".")[0]+".png")
             visualized_output.save(out_path)
-            np.save(os.path.join(args.output, path.split("/")[-1].split(".")[0]+".npy"), predictions)
+            # np.save(os.path.join(args.output, path.split("/")[-1].split(".")[0]+".npy"), predictions)
             
             kernel = np.ones((5, 5), np.uint8)
 
+            mask = copy.copy(img)
+            mask[:] = 0
             if predictions["instances"].scores.sum()!=0:
-                mask = copy.copy(img)
-                mask[:] = 0
+                
                 img = copy.copy(img)
                 if len(predictions["instances"])==1:
-
                     try:
                         original = predictions['instances'].pred_masks.int().detach().cpu().numpy().reshape(predictions['instances'].pred_masks.shape[1],  predictions['instances'].pred_masks.shape[2]).astype(np.uint8)
                     except:
                         original = prediction['instances'].pred_masks.int().detach().cpu().numpy().reshape(prediction['instances'].pred_masks.shape[0],  prediction['instances'].pred_masks.shape[1]).astype(np.uint8)
-                    erosion = cv2.erode(original, kernel=kernel, iterations=5)
-                    dilation = cv2.dilate(original, kernel=kernel, iterations=3)
-                    diff = dilation-erosion
-                    diff = diff.astype(bool)
+                    # erosion = cv2.erode(original, kernel=kernel, iterations=5)
+                    # dilation = cv2.dilate(original, kernel=kernel, iterations=3)
+                    # diff = dilation-erosion
+                    # diff = diff.astype(bool)
+                    label = demo.metadata.get('thing_classes')[predictions["instances"].pred_classes.item()]
+                    keyword = label2keyword(label)
+                    diff = create_mask(original, keyword)
                     mask[diff] += 50
                 else:
                     for i in range(len(predictions["instances"])):
                         original = predictions['instances'].pred_masks[i].int().detach().cpu().numpy().astype(np.uint8)
                         
-                        erosion = cv2.erode(original, kernel=kernel, iterations=5)
-                        dilation = cv2.dilate(original, kernel=kernel, iterations=3)
-                        diff = dilation-erosion
-                        diff = diff.astype(bool)
+                        # erosion = cv2.erode(original, kernel=kernel, iterations=5)
+                        # dilation = cv2.dilate(original, kernel=kernel, iterations=3)
+                        # diff = erosion
+                        # diff = diff.astype(bool)
+                        label = demo.metadata.get('thing_classes')[predictions["instances"][i].pred_classes.item()]
+                        keyword = label2keyword(label)
+
+                        diff = create_mask(original, keyword)
                         mask[diff] += 50
                 blur_kernel = np.ones((5,5),np.float32)/25
                 mask = cv2.filter2D(mask, -1, blur_kernel)
                 cv2.imwrite(os.path.join(args.output, path.split("/")[-1].split(".")[0]+".grasp.png"), img+mask)
-            else:
-                print(predictions["instances"].pred_masks)
+            
+            # np.save('path/to/detected_mask.npy')
            
     
     
     '''
-python demo_imgs.py --config-file configs/Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.yaml --input /home/nagata/sources/Detic/demo_inputs/ --output /home/nagata/sources/Detic/demo_outputs/ --vocabulary lvis --opts MODEL.WEIGHTS models/Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.pth
+python demo_imgs_grasp.py --config-file configs/Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.yaml --input /home/nagata/sources/Detic/demo_inputs/ --output /home/nagata/sources/Detic/demo_outputs/ --vocabulary lvis --opts MODEL.WEIGHTS models/Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.pth
 
     '''
